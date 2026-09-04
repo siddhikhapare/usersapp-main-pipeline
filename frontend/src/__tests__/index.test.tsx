@@ -292,7 +292,13 @@ describe('Home Component', () => {
     // });
 
     it('should use environment variable for API URL', async () => {
-      process.env.API_URL = 'http://test-api:5000';
+      //process.env.API_URL = 'http://test-api:5000';
+      global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ apiUrl: 'http://test-api:5000' }),
+      })
+    ) as jest.Mock;
 
       render(<Home />);
 
@@ -304,10 +310,12 @@ describe('Home Component', () => {
     });
 
     it('should fallback to localhost when env var not set', async () => {
-      delete process.env.NEXT_PUBLIC_API_URL;
-      await act(async() =>{
-        render(<Home />);
-      })
+      // delete process.env.NEXT_PUBLIC_API_URL;
+      // await act(async() =>{
+      //   render(<Home />);
+      // })
+      global.fetch = jest.fn(() => Promise.reject(new Error('fetch failed'))) as jest.Mock;
+      render(<Home />);
       
       await waitFor(() => {
         expect(mockedAxios.get).toHaveBeenCalledWith(

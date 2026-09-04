@@ -24,6 +24,13 @@ jest.mock('next/navigation', () => ({
 // Individual test files can override with mockedAxios.get.mockResolvedValueOnce(...)
 jest.mock('axios');
 
+global.fetch = jest.fn(() =>
+  Promise.resolve({
+    ok: true,
+    json: () => Promise.resolve({ apiUrl: 'http://localhost:4000' }),
+  })
+) as unknown as typeof fetch;
+
 // ── 4. window.location ───────────────────────────────────────────────────────
 // jsdom's location is read-only; redefine it so tests can set hostname/href.
 // Object.defineProperty(window, 'location', {
