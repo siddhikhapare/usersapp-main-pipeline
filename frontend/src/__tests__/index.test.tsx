@@ -292,7 +292,7 @@ describe('Home Component', () => {
     // });
 
     it('should use environment variable for API URL', async () => {
-      process.env.NEXT_PUBLIC_API_URL = 'http://test-api:5000';
+      process.env.API_URL = 'http://test-api:5000';
 
       render(<Home />);
 
