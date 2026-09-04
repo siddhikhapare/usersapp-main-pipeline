@@ -6,6 +6,10 @@ on:
       - main
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   DOCKER_REGISTRY: ${{ vars.DOCKER_REGISTRY }}
 
@@ -499,8 +503,8 @@ jobs:
 
             ### Test Images (unit tests only):
             ```
-            Frontend: ${{ env.DOCKER_REGISTRY }}/frontend-test@${{ needs.build.outputs.frontend-digest }}
-            Backend:  ${{ env.DOCKER_REGISTRY }}/backend-test@${{ needs.build.outputs.backend-digest }}
+            Frontend: ${{ env.DOCKER_REGISTRY }}/frontend-test@${{ needs.build-test.outputs.frontend-digest }}
+            Backend:  ${{ env.DOCKER_REGISTRY }}/backend-test@${{ needs.build-test.outputs.backend-digest }}
             ```
 
             **Status:**
