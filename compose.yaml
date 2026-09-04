@@ -1,0 +1,49 @@
+services:
+  frontend:
+    container_name: frontend
+    image: frontend:v1.0
+    stdin_open: true
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - API_URL=${API_URL} #here we are provididng backend docker svc
+    restart: always
+    depends_on:
+      - backend
+    
+  backend:
+    container_name: backend
+    image: backend:v1.0
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "4000:4000"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_HOST=${POSTGRES_HOST} #here also used host to connect with postgres docker svc
+      - DB_PORT=5432
+    restart: always
+    depends_on:
+      - postgres
+
+  postgres:
+    container_name: postgres
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    ports:
+      - "5432:5432"
+
+volumes:
+  postgres_data:

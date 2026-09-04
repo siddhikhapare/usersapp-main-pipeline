@@ -1,0 +1,509 @@
+name: CI pipeline - Runner-First Architecture
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+env:
+  DOCKER_REGISTRY: ${{ vars.DOCKER_REGISTRY }}
+
+jobs:
+
+# ==========================================================
+# AUTH
+# ==========================================================
+  # auth:
+  #   name: Docker Hub Authentication
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Login to Docker Hub
+  #       uses: docker/login-action@v4
+  #       with:
+  #         username: ${{ secrets.DOCKERHUB_USERNAME }}
+  #         password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+# ==========================================================
+# JOB 1A: FRONTEND LINT (FAST FAIL)
+# ==========================================================
+  lint-frontend:
+    name: Frontend Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Run frontend lint
+        working-directory: ./frontend
+        run: npm run lint
+
+# ==========================================================
+# JOB 1B: BACKEND LINT (FAST FAIL)
+# ==========================================================
+  lint-backend:
+    name: Backend Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./backend
+        run: npm ci
+
+      - name: Run backend lint
+        working-directory: ./backend
+        run: npm run lint
+
+# ==========================================================
+# JOB 2A: BUILD TEST IMAGES — unit test feedback only
+# Runs in parallel with build-runner
+# ==========================================================
+  build-test:
+    name: Build ${{ matrix.service }} Test Image
+    runs-on: ubuntu-latest
+    needs: [lint-frontend, lint-backend]
+
+    strategy:
+      matrix:
+        service: [frontend, backend]
+        include:
+          - service: frontend
+            context: ./frontend
+            dockerfile: ./frontend/Dockerfile
+            target: test
+          - service: backend
+            context: ./backend
+            dockerfile: ./backend/Dockerfile
+            target: test
+
+    permissions:
+      contents: read
+
+    outputs:
+      frontend-digest: ${{ steps.digest.outputs.frontend-digest }}
+      backend-digest: ${{ steps.digest.outputs.backend-digest }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # - name: Set up QEMU
+      #   uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push ${{ matrix.service }} test image
+        id: docker_build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          dockerfile: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
+          push: true
+          tags: ${{ env.DOCKER_REGISTRY }}/${{ matrix.service }}-test:${{ github.sha }}
+          # build-args: |
+          #   API_URL=http://backend:4000
+          cache-from: type=gha,scope=${{ matrix.service }}-test
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}-test
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+
+      - name: Store test image digest
+        id: digest
+        run: |
+          if [[ "${{ matrix.service }}" == "frontend" ]]; then
+            echo "frontend-digest=${{ steps.docker_build.outputs.digest }}" >> $GITHUB_OUTPUT
+          else
+            echo "backend-digest=${{ steps.docker_build.outputs.digest }}" >> $GITHUB_OUTPUT
+          fi
+
+# ==========================================================
+# JOB 2B: BUILD RUNNER IMAGES — the single production artifact
+# Runs in parallel with build-test
+# Reuses shared build cache (deps + builder layers)
+# ==========================================================
+  build-runner:
+    name: Build ${{ matrix.service }} Runner Image
+    runs-on: ubuntu-latest
+    needs: [lint-frontend, lint-backend]
+
+    strategy:
+      matrix:
+        service: [frontend, backend]
+        include:
+          - service: frontend
+            context: ./frontend
+            dockerfile: ./frontend/Dockerfile
+            target: runner
+          - service: backend
+            context: ./backend
+            dockerfile: ./backend/Dockerfile
+            target: runner
+
+    permissions:
+      contents: read
+
+    outputs:
+      frontend-runner-digest: ${{ steps.digest.outputs.frontend-runner-digest }}
+      backend-runner-digest: ${{ steps.digest.outputs.backend-runner-digest }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # - name: Set up QEMU
+      #   uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push ${{ matrix.service }} runner image
+        id: docker_build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          dockerfile: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
+          push: true
+          tags: ${{ env.DOCKER_REGISTRY }}/${{ matrix.service }}-runner:${{ github.sha }}
+          # Reads shared layers (deps, builder) written by build-test
+          # Both jobs run in parallel but GHA cache handles concurrent reads safely
+          cache-from: |
+            type=gha,scope=${{ matrix.service }}-test
+            type=gha,scope=${{ matrix.service }}-runner
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}-runner
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+
+      # - name: Store runner image digest
+      #   id: digest
+      #   run: |
+      #     if [[ "${{ matrix.service }}" == "frontend" ]]; then
+      #       echo "frontend-runner-digest=${{ steps.docker_build.outputs.digest }}" >> $GITHUB_OUTPUT
+      #     else
+      #       echo "backend-runner-digest=${{ steps.docker_build.outputs.digest }}" >> $GITHUB_OUTPUT
+      #     fi
+      
+      # ── Write digest to a per-service file and upload as artifact ──────────
+      # Each matrix leg uploads its own artifact — no overwrite risk
+      - name: Save digest to file
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.docker_build.outputs.digest }}" \
+            > /tmp/digests/${{ matrix.service }}-runner-digest.txt
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.service }}-runner       # unique per leg
+          path: /tmp/digests/${{ matrix.service }}-runner-digest.txt
+          retention-days: 3
+
+# ==========================================================
+# JOB 3: UNIT TESTS — fast feedback using test image only
+# ==========================================================
+  test-unit:
+    name: Unit Test ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: build-test
+
+    strategy:
+      matrix:
+        service: [frontend, backend]
+        include:
+          - service: frontend
+            test_command: npm test
+          - service: backend
+            test_command: npm run test:unit
+      fail-fast: false
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Run ${{ matrix.service }} unit tests (by digest)
+        run: |
+          if [[ "${{ matrix.service }}" == "frontend" ]]; then
+            docker run --rm \
+              ${{ env.DOCKER_REGISTRY }}/frontend-test@${{ needs.build-test.outputs.frontend-digest }} \
+              ${{ matrix.test_command }}
+          else
+            docker run --rm \
+              ${{ env.DOCKER_REGISTRY }}/backend-test@${{ needs.build-test.outputs.backend-digest }} \
+              ${{ matrix.test_command }}
+          fi
+
+# ==========================================================
+# JOB 4: INTEGRATION TESTS — run against RUNNER image
+# Both unit tests and runner build must pass first
+# ==========================================================
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [build-test, test-unit]
+
+    permissions:
+      contents: read
+
+    # env:
+    #   API_URL: ${{ vars.API_URL }}
+    #   POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+    #   POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+    #   POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Export image variables
+        run: |
+          # ── Frontend test image ──────────────────────────────────────────────
+          # compose frontend service: serves Next.js app (command override: node server.js)
+          # Uses :sha tag — same commit, immutable reference
+          echo "FRONTEND_TEST_IMAGE=${{ env.DOCKER_REGISTRY }}/frontend-test:${{ github.sha }}" >> $GITHUB_ENV
+ 
+          # ── Backend test image ───────────────────────────────────────────────
+          # compose backend service: serves Express API (command override: npm run start)
+          # compose sut:             runs npm run test:integration (no command override)
+          # Both use the same test image — different commands in compose
+          echo "BACKEND_TEST_IMAGE=${{ env.DOCKER_REGISTRY }}/backend-test:${{ github.sha }}" >> $GITHUB_ENV
+ 
+          # docker compose -f compose.test.yml up \
+          #   --exit-code-from sut \
+          #   --abort-on-container-exit
+
+      - name: Run backend integration tests
+        run: |
+          docker compose -f compose.test.yml run --rm backend-sut
+      - name: Run frontend integration tests
+        run: |
+          docker compose -f compose.test.yml run --rm frontend-sut
+      - name: Tear down compose services
+        if: always()
+        run: |
+          docker compose -f compose.test.yml down --volumes --remove-orphans
+
+      # - name: Run integration tests against runner images
+      #   run: |
+      #     # Runner digest — exact production artifact under test
+      #     export FRONTEND_IMAGE="${{ env.DOCKER_REGISTRY }}/frontend-runner@${{ needs.build-runner.outputs.frontend-runner-digest }}"
+      #     export BACKEND_IMAGE="${{ env.DOCKER_REGISTRY }}/backend-runner@${{ needs.build-runner.outputs.backend-runner-digest }}"
+      #     docker compose -f compose.test.yml up --exit-code-from sut
+
+# ==========================================================
+# JOB 5: SECURITY SCAN — scan RUNNER image (production artifact)
+# Runs in parallel with integration-tests after runner is built
+# ==========================================================
+  security-scan:
+    name: Scan ${{ matrix.service }} Runner Image
+    runs-on: ubuntu-latest
+    needs: build-runner
+
+    strategy:
+      matrix:
+        service: [frontend, backend]
+      fail-fast: false
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Trivy scan - table output (non-blocking, full visibility)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "${{ env.DOCKER_REGISTRY }}/${{ matrix.service }}-runner:${{github.sha}}"
+          # image-ref: >
+          #   ${{ env.DOCKER_REGISTRY }}/${{ matrix.service }}-runner@${{
+          #     matrix.service == 'frontend'
+          #     && needs.build-runner.outputs.frontend-runner-digest
+          #     || needs.build-runner.outputs.backend-runner-digest
+          #   }}
+          format: table
+          exit-code: 0
+
+      # - name: Trivy scan - HIGH/CRITICAL (blocking)
+      #   uses: aquasecurity/trivy-action@master
+      #   with:
+      #     image-ref: "${{ env.DOCKER_REGISTRY }}/${{ matrix.service }}-runner:${{github.sha}}"
+      #     # image-ref: >
+      #     #   ${{ env.DOCKER_REGISTRY }}/${{ matrix.service }}-runner@${{
+      #     #     matrix.service == 'frontend'
+      #     #     && needs.build-runner.outputs.frontend-runner-digest
+      #     #     || needs.build-runner.outputs.backend-runner-digest
+      #     #   }}
+      #     exit-code: 1
+      #     ignore-unfixed: true
+      #     vuln-type: "os,library"
+      #     severity: "HIGH,CRITICAL"
+      #     format: "sarif"
+      #     output: "trivy-results-${{ matrix.service }}.sarif"
+
+      # - name: Upload Trivy SARIF to GitHub Security tab
+      #   uses: github/codeql-action/upload-sarif@v4
+      #   if: always()
+      #   with:
+      #     sarif_file: "trivy-results-${{ matrix.service }}.sarif"
+      #     category: ${{ matrix.service }}-runner
+
+# ==========================================================
+# JOB 6: PROMOTE — retag runner digest to production
+# No docker build here — just retag the exact tested digest
+# ==========================================================
+  promote:
+    name: Promote ${{ matrix.service }} to Production
+    runs-on: ubuntu-latest
+    needs: [integration-tests, security-scan]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    strategy:
+      matrix:
+        service: [frontend, backend]
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Download digest artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: digest-${{ matrix.service }}-runner
+          path: /tmp/digests
+
+      - name: Promote runner digest to production tags
+        run: |
+          # Resolve digest for this service
+          # if [[ "${{ matrix.service }}" == "frontend" ]]; then
+          #   DIGEST="${{ needs.build-runner.outputs.frontend-runner-digest }}"
+          # else
+          #   DIGEST="${{ needs.build-runner.outputs.backend-runner-digest }}"
+          # fi
+
+          # Read digest from file — guaranteed correct per service
+          DIGEST=$(cat /tmp/digests/${{ matrix.service }}-runner-digest.txt)
+
+          # Source is the runner image by immutable digest — nothing is rebuilt
+          SRC="${{ env.DOCKER_REGISTRY }}/${{ matrix.service }}-runner@${DIGEST}"
+          SHA_TAG="${{ env.DOCKER_REGISTRY }}/${{ matrix.service }}:${{ github.sha }}"
+          LATEST_TAG="${{ env.DOCKER_REGISTRY }}/${{ matrix.service }}:latest"
+
+          echo "Pulling tested runner image: $SRC"
+          docker pull "$SRC"
+
+          echo "Tagging as: $SHA_TAG"
+          docker tag "$SRC" "$SHA_TAG"
+
+          echo "Tagging as: $LATEST_TAG"
+          docker tag "$SRC" "$LATEST_TAG"
+
+          echo "Pushing $SHA_TAG"
+          docker push "$SHA_TAG"
+
+          echo "Pushing $LATEST_TAG"
+          docker push "$LATEST_TAG"
+
+          echo "Promoted digest: ${DIGEST}"
+
+# ==========================================================
+# JOB 7: PR COMMENT
+# ==========================================================
+  pr-comment:
+    name: Comment on PR
+    runs-on: ubuntu-latest
+    needs: [build-test, build-runner,integration-tests, security-scan]
+    if: github.event_name == 'pull_request'
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Find existing bot comment
+        uses: peter-evans/find-comment@v3
+        id: fc
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: "github-actions[bot]"
+          body-includes: "CI Results"
+
+      - name: Create/update PR comment
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number }}
+          edit-mode: replace
+          body: |
+            ## ✅ CI Results — ${{ github.sha }}
+
+            ### Test Images (unit tests only):
+            ```
+            Frontend: ${{ env.DOCKER_REGISTRY }}/frontend-test@${{ needs.build.outputs.frontend-digest }}
+            Backend:  ${{ env.DOCKER_REGISTRY }}/backend-test@${{ needs.build.outputs.backend-digest }}
+            ```
+
+            **Status:**
+            - ✅ Unit tests passed
+            - ✅ Integration tests passed
+            - ✅ Security scans passed

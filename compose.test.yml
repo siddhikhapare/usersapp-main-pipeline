@@ -1,0 +1,88 @@
+version: "3.8"
+
+services:
+  frontend:
+    image: ${FRONTEND_TEST_IMAGE}
+    ports:
+      - "3000:3000"
+    environment:
+      API_URL: http://backend:4000
+      PORT: 3000
+      HOSTNAME: "0.0.0.0"
+    depends_on:
+      backend:
+        condition: service_healthy 
+    command: ["node", "server.js"]
+
+  backend:
+    image: ${BACKEND_TEST_IMAGE}
+    ports:
+      - "4000:4000"
+    environment:
+      - POSTGRES_USER=test
+      - POSTGRES_PASSWORD=test
+      - POSTGRES_DB=testdb
+      - POSTGRES_HOST=postgres
+      - DB_PORT=5432
+    depends_on:
+      postgres:
+        condition: service_healthy 
+    command: ["node", "index.js"]  #[npm run start]
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4000/health || exit 1"] 
+      interval: 5s 
+      timeout: 3s 
+      retries: 5 
+      start_period: 15s 
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=test
+      - POSTGRES_PASSWORD=test
+      - POSTGRES_DB=testdb
+    tmpfs:
+      - /var/lib/postgresql/data        # fresh DB every CI run, no leftover data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d testdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    # volumes:
+    #   - pgdata:/var/lib/postgresql/data
+
+  backend-sut:
+    image: ${BACKEND_TEST_IMAGE}        
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: testdb
+      DB_PORT: 5432
+    depends_on:
+      postgres:
+        condition: service_healthy      # waits until pg_isready actually passes
+    command: ["npm", "run", "test:integration"]
+
+  
+  frontend-sut:
+   image: ${FRONTEND_TEST_IMAGE}
+   environment:
+     API_URL: http://backend:4000
+   depends_on:
+     backend:
+       condition: service_healthy
+   # jest.integration.config.js picks up __tests__/**/*.test.ts
+   command: ["npm", "run", "test:integration"]
+   #command: ["npx", "jest", "--config", "jest.integration.config.js", "--forceExit"]
+
+  # sut:
+  #   image: ${FRONTEND_IMAGE}
+  #   depends_on:
+  #     - backend
+  #   command: ["npm", "run", "test:integration"]
+
+# volumes:
+#   pgdata:
